@@ -16,6 +16,55 @@ from data_processor import DataProcessor, get_data_quality_summary
 load_dotenv()
 
 
+def format_indian_currency(value: float) -> str:
+    """
+    Format a number in Indian currency style with complete breakdown.
+    1 Crore = 10,000,000 (1 followed by 7 zeros)
+    1 Lakh = 100,000 (1 followed by 5 zeros)
+    1 Thousand = 1,000
+    Shows exact value: X Cr Y L Z K (e.g., ₹10,73,89,777)
+    """
+    if value is None or pd.isna(value):
+        return "N/A"
+
+    abs_value = abs(value)
+    sign = "-" if value < 0 else ""
+
+    # Round to nearest rupee for display
+    abs_value = round(abs_value)
+
+    # Format in Indian numbering system (XX,XX,XX,XXX)
+    if abs_value >= 10000000:  # >= 1 Crore
+        crores = int(abs_value // 10000000)
+        remaining = int(abs_value % 10000000)
+        lakhs = remaining // 100000
+        thousands = (remaining % 100000) // 1000
+        hundreds = remaining % 1000
+
+        # Build Indian format: Cr,LL,TT,HHH
+        formatted = f"{sign}₹{crores},{lakhs:02d},{thousands:02d},{hundreds:03d}"
+    elif abs_value >= 100000:  # >= 1 Lakh
+        lakhs = int(abs_value // 100000)
+        remaining = int(abs_value % 100000)
+        thousands = remaining // 1000
+        hundreds = remaining % 1000
+
+        formatted = f"{sign}₹{lakhs},{thousands:02d},{hundreds:03d}"
+    elif abs_value >= 1000:
+        thousands = int(abs_value // 1000)
+        hundreds = int(abs_value % 1000)
+        formatted = f"{sign}₹{thousands},{hundreds:03d}"
+    else:
+        formatted = f"{sign}₹{int(abs_value)}"
+
+    return formatted
+
+
+def format_value_dict(value_dict: dict) -> dict:
+    """Format all values in a dictionary to Indian currency style."""
+    return {k: format_indian_currency(v) for k, v in value_dict.items()}
+
+
 # Define tools for the agent
 TOOLS = [
     {
@@ -78,8 +127,19 @@ SYSTEM_PROMPT = """You are a Business Intelligence assistant for a company that 
 ## Response Format:
 - Start with a DIRECT, CONCISE answer to the question
 - Include relevant metrics and numbers in a clear format (use tables or bullet points)
-- Format large numbers in Indian style: Crores (Cr) for values >= 1 Cr, Lakhs (L) otherwise (1 Cr = 10,000,000, 1 L = 100,000)
 - Keep responses focused and executive-friendly - founders want quick insights, not data dumps
+
+## CRITICAL - Currency Formatting (MUST FOLLOW):
+- All values are in Indian Rupees (₹)
+- **ALWAYS use the "_formatted" fields** from the summary data - these contain EXACT pre-calculated values
+- NEVER convert or calculate currency values yourself - you WILL make errors
+- Copy the formatted values EXACTLY as they appear (e.g., "₹11,74,464" not "₹0.01 Cr")
+- The formatted values use Indian numbering: ₹Cr,LL,TT,HHH (Crores, Lakhs, Thousands, Hundreds)
+- Examples of CORRECT usage:
+  * If "value_by_sector_formatted": {"Mining": "₹45,48,38,417"} → use "₹45,48,38,417"
+  * If "value_by_sector_formatted": {"Construction": "₹11,74,464"} → use "₹11,74,464"
+  * If "total_pipeline_value_formatted": "₹230,55,18,041" → use "₹230,55,18,041"
+- WRONG: Converting ₹1174464 to "₹0.01 Cr" - NEVER DO THIS
 
 ## Data Quality Reporting (IMPORTANT - Keep it brief):
 - Only mention data quality issues that are RELEVANT to the specific question asked
@@ -87,9 +147,6 @@ SYSTEM_PROMPT = """You are a Business Intelligence assistant for a company that 
 - Do NOT list every missing column - only mention if it directly affects the answer
 - Example good caveat: "Note: 19 work orders missing end dates were excluded from delay calculation"
 - Example bad caveat: Listing 20+ columns with missing values
-
-## Currency:
-- All values are in Indian Rupees (₹)
 """
 
 
@@ -174,8 +231,12 @@ class BIAgent:
         # Value metrics
         if value_col:
             numeric_values = pd.to_numeric(df[value_col], errors='coerce')
-            summary["total_pipeline_value"] = float(numeric_values.sum())
-            summary["avg_deal_value"] = float(numeric_values.mean()) if numeric_values.notna().any() else 0
+            total_pipeline = float(numeric_values.sum())
+            avg_deal = float(numeric_values.mean()) if numeric_values.notna().any() else 0
+            summary["total_pipeline_value"] = total_pipeline
+            summary["total_pipeline_value_formatted"] = format_indian_currency(total_pipeline)
+            summary["avg_deal_value"] = avg_deal
+            summary["avg_deal_value_formatted"] = format_indian_currency(avg_deal)
             summary["deals_with_value"] = int(numeric_values.notna().sum())
 
         # Status breakdown
@@ -215,6 +276,7 @@ class BIAgent:
                 lambda x: pd.to_numeric(x, errors='coerce').sum()
             ).to_dict()
             summary["value_by_sector"] = value_by_sector
+            summary["value_by_sector_formatted"] = format_value_dict(value_by_sector)
 
         # Value by status
         if value_col and status_col:
@@ -222,6 +284,7 @@ class BIAgent:
                 lambda x: pd.to_numeric(x, errors='coerce').sum()
             ).to_dict()
             summary["value_by_status"] = value_by_status
+            summary["value_by_status_formatted"] = format_value_dict(value_by_status)
 
         # Deals by probability and sector
         if prob_col and sector_col:
@@ -240,7 +303,9 @@ class BIAgent:
                 summary["open_deals_by_probability"] = open_deals[prob_col].value_counts().to_dict()
             if value_col:
                 open_values = pd.to_numeric(open_deals[value_col], errors='coerce')
-                summary["open_deals_total_value"] = float(open_values.sum())
+                open_total = float(open_values.sum())
+                summary["open_deals_total_value"] = open_total
+                summary["open_deals_total_value_formatted"] = format_indian_currency(open_total)
 
         # Won deals
         if status_col:
@@ -250,7 +315,9 @@ class BIAgent:
                 summary["won_deals_by_sector"] = won_deals[sector_col].value_counts().to_dict()
             if value_col:
                 won_values = pd.to_numeric(won_deals[value_col], errors='coerce')
-                summary["won_deals_total_value"] = float(won_values.sum())
+                won_total = float(won_values.sum())
+                summary["won_deals_total_value"] = won_total
+                summary["won_deals_total_value_formatted"] = format_indian_currency(won_total)
 
         # DATA QUALITY INFO - Critical for transparent reporting
         summary["data_quality"] = {
@@ -320,20 +387,28 @@ class BIAgent:
         # Financial summaries
         if amount_col:
             numeric_values = pd.to_numeric(df[amount_col], errors='coerce')
-            summary["total_order_value"] = float(numeric_values.sum())
+            total_order = float(numeric_values.sum())
+            summary["total_order_value"] = total_order
+            summary["total_order_value_formatted"] = format_indian_currency(total_order)
             summary["orders_with_value"] = int(numeric_values.notna().sum())
 
         if billed_col:
             billed_values = pd.to_numeric(df[billed_col], errors='coerce')
-            summary["total_billed_value"] = float(billed_values.sum())
+            total_billed = float(billed_values.sum())
+            summary["total_billed_value"] = total_billed
+            summary["total_billed_value_formatted"] = format_indian_currency(total_billed)
 
         if collected_col:
             collected_values = pd.to_numeric(df[collected_col], errors='coerce')
-            summary["total_collected_value"] = float(collected_values.sum())
+            total_collected = float(collected_values.sum())
+            summary["total_collected_value"] = total_collected
+            summary["total_collected_value_formatted"] = format_indian_currency(total_collected)
 
         if receivable_col:
             receivable_values = pd.to_numeric(df[receivable_col], errors='coerce')
-            summary["total_receivable"] = float(receivable_values.sum())
+            total_receivable = float(receivable_values.sum())
+            summary["total_receivable"] = total_receivable
+            summary["total_receivable_formatted"] = format_indian_currency(total_receivable)
 
         # Status breakdowns
         if exec_status_col:
@@ -371,6 +446,7 @@ class BIAgent:
                 lambda x: pd.to_numeric(x, errors='coerce').sum()
             ).to_dict()
             summary["value_by_sector"] = {k: float(v) for k, v in value_by_sector.items()}
+            summary["value_by_sector_formatted"] = format_value_dict(value_by_sector)
 
         # Value by execution status
         if amount_col and exec_status_col:
@@ -378,6 +454,7 @@ class BIAgent:
                 lambda x: pd.to_numeric(x, errors='coerce').sum()
             ).to_dict()
             summary["value_by_execution_status"] = {k: float(v) for k, v in value_by_status.items()}
+            summary["value_by_execution_status_formatted"] = format_value_dict(value_by_status)
 
         # DELAYED WORK ORDERS - Past end date but not completed
         from datetime import datetime
@@ -405,6 +482,7 @@ class BIAgent:
             if amount_col and len(delayed) > 0:
                 delayed_value = pd.to_numeric(delayed[amount_col], errors='coerce').sum()
                 summary["delayed_work_orders"]["total_value"] = float(delayed_value)
+                summary["delayed_work_orders"]["total_value_formatted"] = format_indian_currency(delayed_value)
 
         # DATA QUALITY INFO
         summary["data_quality"] = {
